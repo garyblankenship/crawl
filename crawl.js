@@ -33,11 +33,22 @@ async function saveCache(visited) {
 function getFilePath(url) {
     const parsedUrl = new URL(url);
     const pathParts = parsedUrl.pathname.split("/").filter(Boolean);
-    let filename = pathParts.pop() || "index.html";
-    if (!filename.includes(".")) {
-        filename += ".html";
+    let filename = "";
+
+    if (parsedUrl.pathname.endsWith("/")) {
+        // URL ends with a slash, it's definitely a directory
+        filename = "index.html";
+        return path.join(OUTPUT_DIR, parsedUrl.hostname, ...pathParts, filename);
+    } else {
+        // URL doesn't end with a slash, check for file extension
+        filename = pathParts.pop() || "index.html";
+        if (!filename.includes(".")) {
+            filename = "index.html"
+            return path.join(OUTPUT_DIR, parsedUrl.hostname, ...pathParts, filename);
+
+        }
+        return path.join(OUTPUT_DIR, parsedUrl.hostname, ...pathParts, filename);
     }
-    return path.join(OUTPUT_DIR, parsedUrl.hostname, ...pathParts, filename);
 }
 
 function wait(ms) {
@@ -67,11 +78,29 @@ function shouldExclude(url, patterns) {
     return false;
 }
 
+function normalizeUrl(url) {
+    try {
+        const parsedUrl = new URL(url);
+        if (parsedUrl.pathname.endsWith('/') && parsedUrl.searchParams.has('C')) {
+            parsedUrl.searchParams.delete('C');
+            parsedUrl.searchParams.delete('O');
+            parsedUrl.searchParams.delete('M');
+            parsedUrl.searchParams.delete('S');
+            parsedUrl.searchParams.delete('D');
+            parsedUrl.searchParams.delete('N');
+
+        }
+        return parsedUrl.toString();
+    } catch (error) {
+        console.error(`  Error normalizing URL ${url}:`, error);
+        return url;
+    }
+}
 async function crawlPage(page, url, baseUrl, exclusionPatterns) {
     console.log(`Crawling: ${url}`);
 
     try {
-        const response = await page.goto(url, { waitUntil: "networkidle" });
+        const response = await page.goto(url, { waitUntil: "domcontentloaded" });
         if (!response) {
             console.log(`  Failed to load (null response): ${url}`);
             return [];
@@ -95,15 +124,21 @@ async function crawlPage(page, url, baseUrl, exclusionPatterns) {
         const newLinks = [];
 
         for (const link of links) {
+            let absoluteLink;
             try {
-                const absoluteLink = new URL(link, url);
-                if (absoluteLink.hostname === baseUrlObj.hostname) {
-                    newLinks.push(absoluteLink.toString());
-                }
-            } catch (linkError) {
-                console.error(`  Error processing link ${link}:`, linkError);
+                absoluteLink = new URL(link, url);
+            } catch (error) {
+                console.error(`  Skipping invalid URL: ${link}`); // Log and skip
+                continue; // Skip to the next link
             }
+
+            if (absoluteLink.hostname !== baseUrlObj.hostname) {
+                continue; // Skip external links
+            }
+            const normalized = normalizeUrl(absoluteLink.toString())
+            newLinks.push(normalized);
         }
+
         return newLinks;
 
     } catch (error) {
@@ -111,6 +146,9 @@ async function crawlPage(page, url, baseUrl, exclusionPatterns) {
         return [];
     }
 }
+
+
+
 async function main(startUrl, force, depth, delay) {
     const browser = await chromium.launch();
     const page = await browser.newPage();
@@ -124,11 +162,13 @@ async function main(startUrl, force, depth, delay) {
     const visited = await loadCache();
     const exclusionPatterns = await loadExclusionPatterns();
 
+    const normalizedStartUrl = normalizeUrl(startUrl);
+
     if (force) {
-        visited.delete(startUrl);
+        visited.delete(normalizedStartUrl);
     }
 
-    const queue = [{ url: startUrl, depth: 0 }];
+    const queue = [{ url: normalizedStartUrl, depth: 0 }];
 
     while (queue.length > 0) {
         const { url: currentUrl, depth: currentDepth } = queue.shift();
@@ -156,7 +196,7 @@ async function main(startUrl, force, depth, delay) {
 }
 
 const argv = yargs(hideBin(process.argv))
-    .scriptName("crawl")
+    .scriptName("crawler")
     .usage("Usage: $0 <start_url> [-f] [-d <depth>] [--delay <seconds>]")
     .option("f", {
         alias: "force",
